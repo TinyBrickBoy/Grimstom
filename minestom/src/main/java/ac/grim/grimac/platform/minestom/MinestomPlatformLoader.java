@@ -3,6 +3,15 @@ package ac.grim.grimac.platform.minestom;
 import ac.grim.grimac.GrimAPI;
 import ac.grim.grimac.api.plugin.GrimPlugin;
 import ac.grim.grimac.platform.api.PlatformLoader;
+import ac.grim.grimac.utils.anticheat.LogUtil;
+import com.github.retrooper.packetevents.protocol.player.User;
+import net.minestom.server.MinecraftServer;
+import net.minestom.server.entity.Player;
+import net.minestom.server.event.player.PlayerDisconnectEvent;
+import net.minestom.server.event.player.PlayerSpawnEvent;
+import net.minestom.server.network.player.PlayerSocketConnection;
+
+import java.nio.channels.SocketChannel;
 import ac.grim.grimac.platform.api.PlatformServer;
 import ac.grim.grimac.platform.api.command.CommandService;
 import ac.grim.grimac.platform.api.manager.ItemResetHandler;
@@ -55,6 +64,49 @@ public final class MinestomPlatformLoader implements PlatformLoader {
     public void boot() {
         GrimAPI.INSTANCE.load(this);
         GrimAPI.INSTANCE.start();
+        registerPlayerLifecycle();
+    }
+
+    /**
+     * Registriert Spieler bei Grim, sobald sie in die Welt spawnen, und meldet sie beim Verlassen ab.
+     *
+     * <p><b>Warum nötig:</b> Grim erzeugt seinen {@code GrimPlayer} normalerweise in
+     * {@code PacketPlayerJoinQuit#onPacketSend} beim {@code LOGIN_SUCCESS}-Paket. Das
+     * packetevents-minestom-Binding fabriziert den {@link User} aber erst bei
+     * {@code AsyncPlayerConfigurationEvent} (nach dem Login) und feuert weder das
+     * {@code LOGIN_SUCCESS}-Send-Event noch {@code UserLoginEvent}. Ohne diesen Hook würde Grim
+     * daher <b>nie</b> einen Spieler tracken → keine Checks → keine Flags. Hier übernimmt die
+     * Plattform-Glue das, was der Login-Lifecycle auf anderen Plattformen erledigt:
+     * {@code PlayerDataManager#addUser} beim ersten Spawn (Zustand PLAY, {@link User} existiert
+     * bereits) und {@code onDisconnect} beim Verlassen.
+     */
+    private void registerPlayerLifecycle() {
+        var handler = MinecraftServer.getGlobalEventHandler();
+        handler.addListener(PlayerSpawnEvent.class, event -> {
+            if (!event.isFirstSpawn()) {
+                return;
+            }
+            User user = resolveUser(event.getPlayer());
+            if (user != null) {
+                GrimAPI.INSTANCE.getPlayerDataManager().addUser(user);
+                LogUtil.info("Registered player with Grim: " + event.getPlayer().getUsername());
+            }
+        });
+        handler.addListener(PlayerDisconnectEvent.class, event -> {
+            User user = resolveUser(event.getPlayer());
+            if (user != null) {
+                GrimAPI.INSTANCE.getPlayerDataManager().onDisconnect(user);
+            }
+        });
+    }
+
+    /** Holt den packetevents-{@link User} zu einem Minestom-Spieler über dessen Socket-Channel. */
+    private User resolveUser(Player player) {
+        if (!(player.getPlayerConnection() instanceof PlayerSocketConnection conn)) {
+            return null; // Nicht-Socket-Verbindung (Test/Fake) — nichts zu tracken
+        }
+        SocketChannel channel = conn.getChannel();
+        return packetEvents.getProtocolManager().getUser(channel);
     }
 
     /** Stops Grim. Call on server shutdown. */
