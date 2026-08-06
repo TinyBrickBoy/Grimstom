@@ -155,6 +155,11 @@ public class SetbackTeleportUtil extends Check implements PostPredictionCheck {
     }
 
     private void blockMovementsUntilResync(boolean simulateNextTickPosition, boolean isResync) {
+        // Minestom: observe-only. Grim must not SEND setback/resync teleports to the client — the port
+        // can't complete the teleport handshake, so a setback yanks the client to a phantom (void)
+        // position => "flying/falling through the map" on join. Combined with shouldBlockMovement()==false
+        // this makes Grim purely passive on Minestom (it still predicts + flags, just never corrects).
+        if (ac.grim.grimac.utils.latency.CompensatedWorld.usePlatformWorldFallback) return;
         if (requiredSetBack == null) return; // Hasn't spawned
         if (player.platformPlayer != null && player.noSetbackPermission)
             return; // The player has permission to cheat
@@ -231,6 +236,8 @@ public class SetbackTeleportUtil extends Check implements PostPredictionCheck {
     }
 
     private void sendSetback(SetBackData data) {
+        // Minestom: never push a correction teleport (observe-only). See blockMovementsUntilResync.
+        if (ac.grim.grimac.utils.latency.CompensatedWorld.usePlatformWorldFallback) return;
         isSendingSetback = true;
         Vector3d position = data.getTeleportData().getLocation();
 
@@ -395,6 +402,14 @@ public class SetbackTeleportUtil extends Check implements PostPredictionCheck {
      * @return If the player is in a desync state and is waiting on information from the server
      */
     public boolean shouldBlockMovement() {
+        // Minestom: never cancel the client's movement packets. The port can't reliably complete the
+        // teleport/setback handshake (transaction-timing + empty chunk replica), so blocking movement
+        // leaves the player stuck server-side at spawn while the client walks on — massive desync
+        // ("looking through the map" on join) and Simulation/GroundSpoof floods on every legit move.
+        // We run observe-only here (no setback/kick), so movement must always pass through to Minestom.
+        if (ac.grim.grimac.utils.latency.CompensatedWorld.usePlatformWorldFallback) {
+            return false;
+        }
         // This is required to ensure protection from servers teleporting from CREATIVE to SURVIVAL
         // I should likely refactor
         return insideUnloadedChunk() || blockOffsets || (requiredSetBack != null && !requiredSetBack.isComplete());
@@ -415,10 +430,30 @@ public class SetbackTeleportUtil extends Check implements PostPredictionCheck {
      * @return Whether the player has loaded the chunk and accepted a teleport to correct movement or not
      */
     public boolean insideUnloadedChunk() {
-        Column column = player.compensatedWorld.getChunk(GrimMath.floor(player.x) >> 4, GrimMath.floor(player.z) >> 4);
+        int chunkX = GrimMath.floor(player.x) >> 4;
+        int chunkZ = GrimMath.floor(player.z) >> 4;
+        Column column = player.compensatedWorld.getChunk(chunkX, chunkZ);
+
+        boolean replicaMissing = column == null || column.transaction() >= player.lastTransactionReceived.get();
+
+        // Minestom: Grim's packet-based chunk replica is never populated, so `column` is always null.
+        // Without this, insideUnloadedChunk() is permanently true → shouldBlockMovement() cancels EVERY
+        // movement packet → the player is stuck server-side at spawn while Grim tracks the real (moving)
+        // position → massive Simulation/GroundSpoof desync. Consult the live instance: if it has the
+        // chunk loaded, the player is NOT in an unloaded chunk.
+        if (replicaMissing
+                && ac.grim.grimac.utils.latency.CompensatedWorld.usePlatformWorldFallback
+                && player.platformPlayer != null) {
+            try {
+                if (player.platformPlayer.getWorld().isChunkLoaded(chunkX, chunkZ)) {
+                    replicaMissing = false;
+                }
+            } catch (Throwable ignored) {
+            }
+        }
 
         // If true, the player is in an unloaded chunk
-        return !player.disableGrim && (column == null || column.transaction() >= player.lastTransactionReceived.get() ||
+        return !player.disableGrim && (replicaMissing ||
                 // The player hasn't loaded past the DOWNLOADING TERRAIN screen
                 !player.getSetbackTeleportUtil().hasAcceptedSpawnTeleport);
     }

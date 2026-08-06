@@ -466,16 +466,20 @@ public class CompensatedWorld implements PacketWorld {
     public WrappedBlockState getBlock(int x, int y, int z) {
         if (noNegativeBlocks && y < 0) return airData;
 
+        // Minestom: the packet-based chunk replica IS populated, but the port's chunk decoding yields
+        // all-air (verified: colNull=false → block=air while the live instance has grass). Reading the
+        // replica therefore hands every check a phantom empty world → GroundSpoof/Simulation on every
+        // legit move. Read straight from the authoritative live instance instead. Not lag-compensated,
+        // but a correct world beats a void one. Bukkit (flag off) keeps the packet-replica path.
+        if (usePlatformWorldFallback) {
+            return platformWorldFallback(x, y, z);
+        }
+
         try {
             Column column = getChunk(x >> 4, z >> 4);
 
-            // No packet-replica chunk here: on Minestom read the live instance instead of assuming air.
-            if (column == null) {
-                return platformWorldFallback(x, y, z);
-            }
-
             int localY = y - minHeight;
-            if (localY < 0 || (localY >> 4) >= column.chunks().length) return airData;
+            if (column == null || localY < 0 || (localY >> 4) >= column.chunks().length) return airData;
 
             BaseChunk chunk = column.chunks()[localY >> 4];
             if (chunk != null) {
