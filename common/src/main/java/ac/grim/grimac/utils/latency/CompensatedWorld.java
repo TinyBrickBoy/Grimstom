@@ -2,6 +2,7 @@ package ac.grim.grimac.utils.latency;
 
 import ac.grim.grimac.GrimAPI;
 import ac.grim.grimac.api.PacketWorld;
+import ac.grim.grimac.platform.api.world.PlatformWorld;
 import ac.grim.grimac.player.GrimPlayer;
 import ac.grim.grimac.utils.change.BlockModification;
 import ac.grim.grimac.utils.chunks.Column;
@@ -68,6 +69,21 @@ import java.util.Set;
 public class CompensatedWorld implements PacketWorld {
     public static final ClientVersion blockVersion = PacketEvents.getAPI().getServerManager().getVersion().toClientVersion();
     private static final WrappedBlockState airData = WrappedBlockState.getByGlobalId(blockVersion, 0);
+
+    /**
+     * Minestom-only: when the packet-based chunk replica has no data for a region, read the block
+     * straight from the platform world (the live Minestom instance) instead of returning air.
+     * <p>
+     * Grim normally builds its world model purely from intercepted server-&gt;client CHUNK_DATA
+     * packets. On the Minestom port those chunk packets do not reliably reach Grim (Minestom's
+     * chunk send path / packet timing vs. player registration), so the replica stays empty and
+     * every check sees the player standing in the void — GroundSpoof + Simulation flag on every
+     * legit move. Reading the authoritative instance block as a fallback fixes that. Trade-off:
+     * these reads are not lag-compensated, but a correct world beats a phantom one. Off by default
+     * so the Bukkit path (where the packet replica is authoritative) is unchanged; the Minestom
+     * loader flips it on at boot.
+     */
+    public static volatile boolean usePlatformWorldFallback = false;
     public final GrimPlayer player;
     public final Long2ObjectMap<Column> chunks;
     // Packet locations for blocks
@@ -453,16 +469,43 @@ public class CompensatedWorld implements PacketWorld {
         try {
             Column column = getChunk(x >> 4, z >> 4);
 
-            y -= minHeight;
-            if (column == null || y < 0 || (y >> 4) >= column.chunks().length) return airData;
+            // No packet-replica chunk here: on Minestom read the live instance instead of assuming air.
+            if (column == null) {
+                return platformWorldFallback(x, y, z);
+            }
 
-            BaseChunk chunk = column.chunks()[y >> 4];
+            int localY = y - minHeight;
+            if (localY < 0 || (localY >> 4) >= column.chunks().length) return airData;
+
+            BaseChunk chunk = column.chunks()[localY >> 4];
             if (chunk != null) {
-                return chunk.get(blockVersion, x & 0xF, y & 0xF, z & 0xF);
+                return chunk.get(blockVersion, x & 0xF, localY & 0xF, z & 0xF);
             }
         } catch (Exception ignored) {
         }
 
+        return airData;
+    }
+
+    /**
+     * Reads a block from the platform world (live Minestom instance) when the packet replica has no
+     * chunk for it. No-op (returns air) unless {@link #usePlatformWorldFallback} is on. Guards on a
+     * loaded chunk so an unloaded region still reads as air rather than blocking on a chunk load.
+     */
+    private WrappedBlockState platformWorldFallback(int x, int y, int z) {
+        if (!usePlatformWorldFallback || player.platformPlayer == null) {
+            return airData;
+        }
+        try {
+            PlatformWorld world = player.platformPlayer.getWorld();
+            if (world != null && world.isChunkLoaded(x >> 4, z >> 4)) {
+                WrappedBlockState state = world.getBlockAt(x, y, z);
+                if (state != null) {
+                    return state;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
         return airData;
     }
 

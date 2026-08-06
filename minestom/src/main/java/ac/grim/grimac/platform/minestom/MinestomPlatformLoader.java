@@ -62,6 +62,9 @@ public final class MinestomPlatformLoader implements PlatformLoader {
 
     /** Loads and starts Grim on this platform. Call once after PacketEvents is initialized. */
     public void boot() {
+        // Minestom doesn't reliably feed CHUNK_DATA into Grim's packet-based world replica, so let
+        // the world reads fall back to the live instance instead of seeing the player in the void.
+        ac.grim.grimac.utils.latency.CompensatedWorld.usePlatformWorldFallback = true;
         GrimAPI.INSTANCE.load(this);
         GrimAPI.INSTANCE.start();
         registerPlayerLifecycle();
@@ -87,7 +90,9 @@ public final class MinestomPlatformLoader implements PlatformLoader {
                 return;
             }
             User user = resolveUser(event.getPlayer());
-            if (user != null) {
+            // Guard against a double add: with after-send tasks now running (packetevents-minestom),
+            // Grim's own LOGIN_SUCCESS registration may already have added the player.
+            if (user != null && GrimAPI.INSTANCE.getPlayerDataManager().getPlayer(user) == null) {
                 GrimAPI.INSTANCE.getPlayerDataManager().addUser(user);
                 LogUtil.info("Registered player with Grim: " + event.getPlayer().getUsername());
             }

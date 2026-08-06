@@ -35,6 +35,10 @@ public class CommonGrimArguments {
      * <p>
      * This setting is opt-out (default: true) and requires a server restart to change.
      */
-    public final static SystemArgument<Boolean> KICK_ON_VIA_PROXY = FACTORY.create(string("KickOnViaProxy", true));
+    // OnThePixel (Minestom + Velocity): ViaVersion runs on the Velocity proxy by design, so clients
+    // legitimately send `vv:proxy_details`. Grim's default kick-on-via-proxy therefore false-flags every
+    // real player (and the kick crashed the tick thread via a Netty-channel cast on Minestom's NIO socket).
+    // Default OFF for this fork; still overridable with -DKickOnViaProxy=true if ever wanted.
+    public final static SystemArgument<Boolean> KICK_ON_VIA_PROXY = FACTORY.create(string("KickOnViaProxy", false));
 
 }
