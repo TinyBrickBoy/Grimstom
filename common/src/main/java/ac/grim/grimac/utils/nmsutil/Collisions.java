@@ -281,6 +281,37 @@ public final class Collisions {
         int minYIterate = Math.max(minBlock, minBlockY);
         int maxYIterate = Math.min(maxBlock, maxBlockY);
 
+        // Minestom: Grim's packet chunk-replica decodes as air, so the section loop below finds no
+        // blocks -> no collision -> the player is predicted in permanent free-fall (offset 3.92 =
+        // terminal velocity) -> GroundSpoof/Simulation flood. Read each block via getBlock() (which
+        // reads the authoritative live instance on Minestom) so collision sees the real world.
+        if (CompensatedWorld.usePlatformWorldFallback) {
+            for (int x = minBlockX; x <= maxBlockX; x++) {
+                for (int z = minBlockZ; z <= maxBlockZ; z++) {
+                    for (int y = minYIterate; y <= maxYIterate; y++) {
+                        WrappedBlockState data = player.compensatedWorld.getBlock(x, y, z);
+                        if (data.getGlobalId() == 0) continue; // air
+
+                        int edgeCount = ((x == minBlockX || x == maxBlockX) ? 1 : 0) +
+                                ((y == minBlockY || y == maxBlockY) ? 1 : 0) +
+                                ((z == minBlockZ || z == maxBlockZ) ? 1 : 0);
+
+                        final StateType type = data.getType();
+                        if (edgeCount != 3 && (edgeCount != 1 || Materials.isShapeExceedsCube(type))
+                                && (edgeCount != 2 || type == StateTypes.PISTON_HEAD)) {
+                            final CollisionBox collisionBox = CollisionData.getData(type).getMovementCollisionBox(player, player.getClientVersion(), data, x, y, z);
+                            if (!onlyCheckCollide) {
+                                collisionBox.downCast(listOfBlocks);
+                            } else if (collisionBox.isCollided(wantedBB)) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+            return collided;
+        }
+
         for (int currChunkZ = minChunkZ; currChunkZ <= maxChunkZ; ++currChunkZ) {
             int minZ = currChunkZ == minChunkZ ? minBlockZ & 15 : 0; // coordinate in chunk
             int maxZ = currChunkZ == maxChunkZ ? maxBlockZ & 15 : 15; // coordinate in chunk

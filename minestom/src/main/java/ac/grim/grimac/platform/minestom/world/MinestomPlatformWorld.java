@@ -29,27 +29,31 @@ public final class MinestomPlatformWorld implements PlatformWorld {
 
     @Override
     public boolean isChunkLoaded(int chunkX, int chunkZ) {
-        return instance.getChunk(chunkX, chunkZ) != null;
+        return instance != null && instance.getChunk(chunkX, chunkZ) != null;
     }
 
     @Override
     public WrappedBlockState getBlockAt(int x, int y, int z) {
+        // Grims Checks laufen auf dem Paket-Feeder-Thread, wo der Player transient instance==null zeigt.
+        // Ohne Instance kennen wir den Block nicht -> Luft zurückgeben (statt NPE), bis der nächste Tick
+        // wieder mit gültiger Instance liest.
+        if (instance == null) return WrappedBlockState.getByGlobalId(0);
         return WrappedBlockState.getByGlobalId(instance.getBlock(x, y, z).stateId());
     }
 
     @Override
     public String getName() {
-        return instance.getUuid().toString();
+        return instance == null ? "unknown" : instance.getUuid().toString();
     }
 
     @Override
     public @Nullable UUID getUID() {
-        return instance.getUuid();
+        return instance == null ? null : instance.getUuid();
     }
 
     @Override
     public PlatformChunk getChunkAt(int currChunkX, int currChunkZ) {
-        return new MinestomPlatformChunk(instance.getChunk(currChunkX, currChunkZ));
+        return new MinestomPlatformChunk(instance == null ? null : instance.getChunk(currChunkX, currChunkZ));
     }
 
     @Override

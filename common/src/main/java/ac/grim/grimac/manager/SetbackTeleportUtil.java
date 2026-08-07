@@ -67,6 +67,8 @@ public class SetbackTeleportUtil extends Check implements PostPredictionCheck {
     @Getter
     private SetBackData requiredSetBack = null;
     private long lastWorldResync = 0;
+    /** Minestom: Zeitpunkt (ms), zu dem der aktuelle native Rubberband-Teleport losgeschickt wurde (Completion-Timeout). */
+    private long minestomSetbackSentAt = 0;
 
     public SetbackTeleportUtil(GrimPlayer player) {
         super(player);
@@ -74,6 +76,12 @@ public class SetbackTeleportUtil extends Check implements PostPredictionCheck {
 
     @Override
     public void onPredictionComplete(final PredictionComplete predictionComplete) {
+        // Minestom: laufenden nativen Rubberband-Setback ggf. abschließen (Spieler wieder an Zielpos.).
+        // Muss VOR dem lastKnownGoodPosition-Update laufen, damit der Anker erst nach Completion vorrückt.
+        if (ac.grim.grimac.utils.latency.CompensatedWorld.usePlatformWorldFallback) {
+            tickMinestomSetbackCompletion();
+        }
+
         // Grab friction now when we know player on ground and other variables
         Vector3dm afterTickFriction = player.clientVelocity.clone();
 
@@ -155,11 +163,17 @@ public class SetbackTeleportUtil extends Check implements PostPredictionCheck {
     }
 
     private void blockMovementsUntilResync(boolean simulateNextTickPosition, boolean isResync) {
-        // Minestom: observe-only. Grim must not SEND setback/resync teleports to the client — the port
-        // can't complete the teleport handshake, so a setback yanks the client to a phantom (void)
-        // position => "flying/falling through the map" on join. Combined with shouldBlockMovement()==false
-        // this makes Grim purely passive on Minestom (it still predicts + flags, just never corrects).
-        if (ac.grim.grimac.utils.latency.CompensatedWorld.usePlatformWorldFallback) return;
+        // Minestom: Grims paket-basierter Setback-Teleport wird auf dem NIO-Port nie per Transaktion
+        // bestätigt (checkTeleportQueue matcht nie) -> requiredSetBack bliebe ewig "incomplete" ->
+        // Spieler serverseitig festgehängt. Stattdessen fahren wir den Setback über Minestoms NATIVEN
+        // Teleport (player.teleport(Pos)): der Client bestätigt ihn regulär, das zurückgegebene Future
+        // schließt genau dann ab -> das ist unser Resync-Signal. So wirkt Grims eigene Setback-
+        // Entscheidung (nur bei sicheren Verstößen, setback=true) als echter Rubberband wie auf Bukkit,
+        // ohne Festhängen. Legitimes Rest-Rauschen flaggt mit setback=false und kommt hier nie an.
+        if (ac.grim.grimac.utils.latency.CompensatedWorld.usePlatformWorldFallback) {
+            minestomRubberband();
+            return;
+        }
         if (requiredSetBack == null) return; // Hasn't spawned
         if (player.platformPlayer != null && player.noSetbackPermission)
             return; // The player has permission to cheat
@@ -235,8 +249,66 @@ public class SetbackTeleportUtil extends Check implements PostPredictionCheck {
         sendSetback(data);
     }
 
+    /**
+     * Minestom-nativer Rubberband-Setback. Grims paket-basierter Setback ({@link #sendSetback}) wird auf
+     * dem NIO-Port nie per Transaktion bestätigt ({@link #checkTeleportQueue} matcht nie), sodass
+     * {@code requiredSetBack} ewig „incomplete" bliebe und den Spieler serverseitig festhielte. Hier wird
+     * stattdessen über Minestoms <b>native</b> Teleport-API auf Grims sichere Position
+     * ({@link #lastKnownGoodPosition}) zurückgesetzt — der Client bestätigt diesen Teleport regulär.
+     *
+     * <p>{@code requiredSetBack} wird als Freeze-Latch gesetzt: {@link #onPredictionComplete} rückt den
+     * Anker erst wieder vor, wenn der Setback complete ist. Die Completion passiert thread-sicher auf
+     * Grims Thread in {@link #onPredictionComplete} (Spieler nahe Zielposition → Client hat bestätigt),
+     * nicht im Async-Teleport-Callback.
+     */
+    private void minestomRubberband() {
+        if (isExempt()) return; // Spectator/disableGrim/noSetbackPermission/nicht gespawnt
+        if (player.platformPlayer == null) return;
+        if (isPendingSetback()) return; // Ein nativer Setback ist noch unterwegs → nicht spammen (RTT-Drossel)
+
+        final Vector3d safe = lastKnownGoodPosition.pos;
+        final TeleportData td = new TeleportData(new Vector3d(safe.getX(), safe.getY(), safe.getZ()),
+                player.yaw, player.pitch, null, RelativeFlag.YAW.or(RelativeFlag.PITCH),
+                player.lastTransactionSent.get(), 0);
+        requiredSetBack = new SetBackData(td, player.yaw, player.pitch, null, player.inVehicle(), false);
+        minestomSetbackSentAt = System.currentTimeMillis();
+
+        // Semantisches Setback-Event für Observability (wie im Bukkit-Pfad).
+        PLAYER_SETBACK_CHANNEL.fire(player, 0, safe.getX(), safe.getY(), safe.getZ(), minestomSetbackSentAt);
+
+        // Nativer Teleport = regulärer Client-Handshake, kein Festhängen. Completion erfolgt positions-
+        // basiert in onPredictionComplete (thread-sicher), daher hier fire-and-forget.
+        // WICHTIG: auf den Tick-Thread dispatchen. Grims Checks laufen auf dem Paket-Feeder-Thread, wo
+        // der Minestom-Player transient instance==null zeigt -> player.teleport() würfe dort
+        // "setInstance before teleporting". Der EntityScheduler (delay 0) führt auf dem Tick-Thread aus,
+        // wo die Instance gültig ist. Null-World-Location, da teleportAsync nur x/y/z nutzt.
+        final Location target = new Location(null, safe.getX(), safe.getY(), safe.getZ(), player.yaw, player.pitch);
+        GrimAPI.INSTANCE.getScheduler().getEntityScheduler().execute(
+                player.platformPlayer, GrimAPI.INSTANCE.getGrimPlugin(),
+                () -> {
+                    if (player.platformPlayer != null) player.platformPlayer.teleportAsync(target);
+                }, null, 0);
+    }
+
+    /**
+     * Minestom: Completet einen laufenden Rubberband-Setback thread-sicher auf Grims Thread, sobald der
+     * Spieler (nach der Client-Teleport-Bestätigung) wieder an der Zielposition ist — oder nach einem
+     * Timeout als Sicherung gegen ein verpasstes Positions-Match (verhindert dauerhaftes Festhängen).
+     */
+    private void tickMinestomSetbackCompletion() {
+        if (requiredSetBack == null || requiredSetBack.isComplete()) return;
+        final Vector3d target = requiredSetBack.getTeleportData().getLocation();
+        final double dx = player.x - target.getX();
+        final double dy = player.y - target.getY();
+        final double dz = player.z - target.getZ();
+        final boolean nearTarget = dx * dx + dy * dy + dz * dz < 0.25; // innerhalb ~0,5 Block
+        if (nearTarget || System.currentTimeMillis() - minestomSetbackSentAt > 1500) {
+            requiredSetBack.setComplete(true);
+        }
+    }
+
     private void sendSetback(SetBackData data) {
-        // Minestom: never push a correction teleport (observe-only). See blockMovementsUntilResync.
+        // Minestom: no setback teleport (handshake can't complete -> stuck players). Defend via kick.
         if (ac.grim.grimac.utils.latency.CompensatedWorld.usePlatformWorldFallback) return;
         isSendingSetback = true;
         Vector3d position = data.getTeleportData().getLocation();
@@ -402,11 +474,10 @@ public class SetbackTeleportUtil extends Check implements PostPredictionCheck {
      * @return If the player is in a desync state and is waiting on information from the server
      */
     public boolean shouldBlockMovement() {
-        // Minestom: never cancel the client's movement packets. The port can't reliably complete the
-        // teleport/setback handshake (transaction-timing + empty chunk replica), so blocking movement
-        // leaves the player stuck server-side at spawn while the client walks on — massive desync
-        // ("looking through the map" on join) and Simulation/GroundSpoof floods on every legit move.
-        // We run observe-only here (no setback/kick), so movement must always pass through to Minestom.
+        // Minestom: never block/hold client movement. Setback CAN'T complete here (the teleport-accept
+        // handshake never matches on the port), so a triggered setback would leave requiredSetBack
+        // forever-incomplete => the player is stuck server-side even after they stop cheating. We defend
+        // via kick instead (see GrimEnforcement), so movement must always pass through.
         if (ac.grim.grimac.utils.latency.CompensatedWorld.usePlatformWorldFallback) {
             return false;
         }
