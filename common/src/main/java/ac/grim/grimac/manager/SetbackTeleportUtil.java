@@ -69,6 +69,8 @@ public class SetbackTeleportUtil extends Check implements PostPredictionCheck {
     private long lastWorldResync = 0;
     /** Minestom: Zeitpunkt (ms), zu dem der aktuelle native Rubberband-Teleport losgeschickt wurde (Completion-Timeout). */
     private long minestomSetbackSentAt = 0;
+    /** Test-only: Rubberband-Debug-Log (nur mit -Dgrim.rubberband.debug=true; auf Prod aus). */
+    private static final boolean RB_DEBUG = Boolean.getBoolean("grim.rubberband.debug");
 
     public SetbackTeleportUtil(GrimPlayer player) {
         super(player);
@@ -273,6 +275,15 @@ public class SetbackTeleportUtil extends Check implements PostPredictionCheck {
         requiredSetBack = new SetBackData(td, player.yaw, player.pitch, null, player.inVehicle(), false);
         minestomSetbackSentAt = System.currentTimeMillis();
 
+        // Test-Diagnose (nur mit -Dgrim.rubberband.debug=true, also im anticheat-devrun-Harness, NICHT
+        // auf Prod): zeigt jeden Rubberband + die erhaltene Blickrichtung, um die View-Preservation und
+        // das Streak-Gating zu verifizieren.
+        if (RB_DEBUG) {
+            System.out.printf("[RB-DEBUG] setback %s -> (%.2f,%.2f,%.2f) yaw=%.1f pitch=%.1f (View bleibt erhalten)%n",
+                    player.user == null ? "?" : player.user.getName(),
+                    safe.getX(), safe.getY(), safe.getZ(), player.yaw, player.pitch);
+        }
+
         // Semantisches Setback-Event für Observability (wie im Bukkit-Pfad).
         PLAYER_SETBACK_CHANNEL.fire(player, 0, safe.getX(), safe.getY(), safe.getZ(), minestomSetbackSentAt);
 
@@ -281,7 +292,8 @@ public class SetbackTeleportUtil extends Check implements PostPredictionCheck {
         // WICHTIG: auf den Tick-Thread dispatchen. Grims Checks laufen auf dem Paket-Feeder-Thread, wo
         // der Minestom-Player transient instance==null zeigt -> player.teleport() würfe dort
         // "setInstance before teleporting". Der EntityScheduler (delay 0) führt auf dem Tick-Thread aus,
-        // wo die Instance gültig ist. Null-World-Location, da teleportAsync nur x/y/z nutzt.
+        // wo die Instance gültig ist. Yaw/Pitch aus der aktuellen Blickrichtung -> teleportAsync behält
+        // die View (new Pos ohne yaw/pitch würde sie auf 0/0 schnappen).
         final Location target = new Location(null, safe.getX(), safe.getY(), safe.getZ(), player.yaw, player.pitch);
         GrimAPI.INSTANCE.getScheduler().getEntityScheduler().execute(
                 player.platformPlayer, GrimAPI.INSTANCE.getGrimPlugin(),

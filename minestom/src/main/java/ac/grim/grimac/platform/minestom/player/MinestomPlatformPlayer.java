@@ -103,7 +103,10 @@ public final class MinestomPlatformPlayer implements PlatformPlayer {
 
     @Override
     public CompletableFuture<Boolean> teleportAsync(Location location) {
-        return player.teleport(new Pos(location.x(), location.y(), location.z()))
+        // Yaw/Pitch MITgeben: new Pos(x,y,z) setzt sie sonst auf 0/0 → beim Setback-Rubberband schnappt
+        // die Blickrichtung auf Süden/gerade. Grim übergibt in der Location die aktuelle Blickrichtung
+        // des Spielers, also bleibt die View beim Zurücksetzen erhalten.
+        return player.teleport(new Pos(location.x(), location.y(), location.z(), location.getYaw(), location.getPitch()))
                 .thenApply(ignored -> Boolean.TRUE);
     }
 
