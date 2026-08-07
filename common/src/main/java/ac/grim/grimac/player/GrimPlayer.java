@@ -959,6 +959,17 @@ public class GrimPlayer implements GrimUser {
 
     public void runNettyTaskInMs(@NotNull Runnable runnable, int ms) {
         Objects.requireNonNull(runnable, "runnable");
+        // Minestom: der Channel ist ein NIO-SocketChannel, kein Netty-Channel — der Cast auf
+        // io.netty.channel.Channel würfe (ClassCastException). Das lief bei JEDEM ausgehenden Paket
+        // (PacketEntityReplication.onPacketSend), sodass Grim server-seitige Velocity (Knockback/Boost/
+        // Explosion/Death-/Teleport-Pakete) NICHT verarbeitete → legitime Schnellbewegung wurde als
+        // Verstoß geflaggt. Auf dem Port die verzögerte Aufgabe ms-genau über Grims Async-Scheduler
+        // ausführen (off-tick, wie Bukkits Netty-EventLoop off-main ist).
+        if (ac.grim.grimac.utils.latency.CompensatedWorld.usePlatformWorldFallback) {
+            GrimAPI.INSTANCE.getScheduler().getAsyncScheduler().runDelayed(
+                    GrimAPI.INSTANCE.getGrimPlugin(), runnable, ms, TimeUnit.MILLISECONDS);
+            return;
+        }
         ((Channel) user.getChannel()).eventLoop().schedule(runnable, ms, TimeUnit.MILLISECONDS);
     }
 
