@@ -28,6 +28,16 @@ public class OffsetHandler extends Check implements PostPredictionCheck {
     private double advantageGained = 0;
     private static final CompletePredictionEvent.Channel COMPLETE_CHANNEL = GrimAPI.INSTANCE.getEventBus().get(CompletePredictionEvent.class);
 
+    // Minestom-Port: Grims Prediction rechnet server-seitige Velocity (Knockback/Boost/Explosion) und
+    // Entity-Kollision nicht sauber ein → legitime kurze Impulse erzeugen große Offsets, genau wie Fly.
+    // Nach Offset-Größe allein nicht trennbar. Unterscheidungsmerkmal: Fly hält den Offset über VIELE
+    // Ticks (kontinuierliche Abweichung), ein Impuls nur über wenige. Daher auf dem Port erst
+    // zurücksetzen, wenn der Offset ANHALTEND (>= {@link #MINESTOM_STREAK_OFFSET}) über
+    // {@link #MINESTOM_STREAK_TICKS} Ticks in Folge liegt.
+    private static final double MINESTOM_STREAK_OFFSET = 0.1;
+    private static final int MINESTOM_STREAK_TICKS = 10;
+    private int minestomHighOffsetStreak = 0;
+
     public OffsetHandler(GrimPlayer player) {
         super(player);
     }
@@ -38,6 +48,16 @@ public class OffsetHandler extends Check implements PostPredictionCheck {
         double offset = predictionComplete.getOffset();
 
         if (COMPLETE_CHANNEL.fire(player, this, offset)) return;
+
+        // Minestom: Streak hoher Offsets zählen (Fly = anhaltend, Impuls = kurz) — siehe Feld-Doku.
+        final boolean minestom = ac.grim.grimac.utils.latency.CompensatedWorld.usePlatformWorldFallback;
+        if (minestom) {
+            if (offset >= MINESTOM_STREAK_OFFSET) {
+                minestomHighOffsetStreak++;
+            } else {
+                minestomHighOffsetStreak = 0;
+            }
+        }
 
         if ((offset >= threshold || offset >= immediateSetbackThreshold)) {
             advantageGained += offset;
@@ -52,7 +72,10 @@ public class OffsetHandler extends Check implements PostPredictionCheck {
 
                     if ((advantageGained >= maxAdvantage || offset >= immediateSetbackThreshold)
                             && !isNoSetbackPermission()
-                            && violations >= setbackViolationThreshold) {
+                            && violations >= setbackViolationThreshold
+                            // Minestom: nur bei anhaltend hohem Offset (Fly) zurücksetzen, nicht bei
+                            // kurzen legitimen Impulsen (Knockback/Kollision/Boost).
+                            && (!minestom || minestomHighOffsetStreak >= MINESTOM_STREAK_TICKS)) {
                         player.getSetbackTeleportUtil().executeViolationSetback();
                     }
                 }
