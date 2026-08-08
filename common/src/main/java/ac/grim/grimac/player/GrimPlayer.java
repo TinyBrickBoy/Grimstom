@@ -234,6 +234,12 @@ public class GrimPlayer implements GrimUser {
     public @Nullable VelocityData likelyKB;
     public @Nullable VelocityData firstBreadExplosion;
     public @Nullable VelocityData likelyExplosions;
+    /**
+     * Minestom: Zeitpunkt (ms) der zuletzt gesehenen server-seitigen Velocity (EntityVelocity =
+     * Knockback/Boost/Explosion). Der Rubberband-Setback wird kurz danach unterdrückt, damit legitime
+     * Impuls-Bewegung nicht als Verstoß zurückgesetzt wird (siehe SetbackTeleportUtil#minestomRubberband).
+     */
+    public volatile long lastServerVelocityMillis = 0;
     public int minAttackSlow;
     public int maxAttackSlow;
     public @MonotonicNonNull GameMode gamemode;

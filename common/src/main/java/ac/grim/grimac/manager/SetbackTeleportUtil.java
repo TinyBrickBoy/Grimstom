@@ -263,10 +263,23 @@ public class SetbackTeleportUtil extends Check implements PostPredictionCheck {
      * Grims Thread in {@link #onPredictionComplete} (Spieler nahe Zielposition → Client hat bestätigt),
      * nicht im Async-Teleport-Callback.
      */
+    /** Basis-Fenster (ms) nach server-seitiger Velocity, in dem IMMER exempt (kurzer Impuls, auch am Boden). */
+    private static final long VELOCITY_GRACE_MS = 1500L;
+    /** Hard-Cap (ms): bis hierhin nach einem Impuls exempt, SOLANGE der Spieler noch in der Luft ist. */
+    private static final long VELOCITY_AIRBORNE_CAP_MS = 6000L;
+
     private void minestomRubberband() {
         if (isExempt()) return; // Spectator/disableGrim/noSetbackPermission/nicht gespawnt
         if (player.platformPlayer == null) return;
         if (isPendingSetback()) return; // Ein nativer Setback ist noch unterwegs → nicht spammen (RTT-Drossel)
+        // Legitimer server-seitiger Impuls (Knockback/Boost per EntityVelocity): Grim rechnet den Bogen
+        // auf dem Port nicht sauber ein, also nicht zurücksetzen. Ein big Knockback/Boost fliegt+FÄLLT
+        // länger als das Basis-Fenster; solange der Spieler danach noch in der Luft ist (fällt), bis zum
+        // Hard-Cap exempt bleiben. Am Boden endet die Kulanz sofort. Ein Fly-Cheater hat keine
+        // server-Velocity → sinceVel ist riesig → beide Bedingungen false → wird weiter gefangen.
+        final long sinceVel = System.currentTimeMillis() - player.lastServerVelocityMillis;
+        if (sinceVel < VELOCITY_GRACE_MS) return;
+        if (sinceVel < VELOCITY_AIRBORNE_CAP_MS && !player.onGround) return;
 
         final Vector3d safe = lastKnownGoodPosition.pos;
         final TeleportData td = new TeleportData(new Vector3d(safe.getX(), safe.getY(), safe.getZ()),

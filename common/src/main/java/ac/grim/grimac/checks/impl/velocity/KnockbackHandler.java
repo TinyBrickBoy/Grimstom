@@ -74,6 +74,10 @@ public class KnockbackHandler extends Check implements PostPredictionCheck {
             player.sendTransaction();
             addPlayerKnockback(entityId, player.lastTransactionSent.get(), new Vector3dm(playerVelocity.getX(), playerVelocity.getY(), playerVelocity.getZ()));
             event.getTasksAfterSend().add(player::sendTransaction);
+            // Minestom: merken, dass der Server gerade Velocity (Knockback/Boost) schickte — der
+            // Rubberband-Setback wird kurz danach unterdrückt, damit dieser legitime Impuls nicht
+            // zurückgezogen wird (die Port-Prediction matcht das KB-Timing nicht immer sauber).
+            player.lastServerVelocityMillis = System.currentTimeMillis();
         }
     }
 
